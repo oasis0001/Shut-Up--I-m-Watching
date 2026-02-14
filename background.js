@@ -94,8 +94,7 @@ function isMissingReceiverError(errorLike) {
 
   return (
     message.includes("Receiving end does not exist") ||
-    message.includes("Could not establish connection") ||
-    message.includes("message port closed before a response was received")
+    message.includes("Could not establish connection")
   );
 }
 
@@ -351,14 +350,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     }
   }
 
-  if (isYouTubeUrl(nextUrl) && (changeInfo.status === "loading" || changeInfo.url)) {
-    void ensureContentScriptInjected(tabId, CONTENT_SCRIPTS.YOUTUBE);
-  }
-
-  if (isSpotifyUrl(nextUrl) && (changeInfo.status === "loading" || changeInfo.url)) {
-    void ensureContentScriptInjected(tabId, CONTENT_SCRIPTS.SPOTIFY);
-  }
-
   if (isSpotifyUrl(nextUrl) && changeInfo.status === "complete") {
     void setSpotifyVolumeForTab(tabId, desiredSpotifyVolume).then((success) => {
       if (success) {
@@ -399,5 +390,4 @@ chrome.runtime.onStartup.addListener(() => {
   scheduleVolumeEvaluation();
 });
 
-void injectScriptsIntoExistingTabs();
 scheduleVolumeEvaluation();

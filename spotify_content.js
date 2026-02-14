@@ -8,10 +8,17 @@
     SET_SPOTIFY_VOLUME: "SET_SPOTIFY_VOLUME",
   });
 
+  const VOLUME_EPSILON = 0.02;
+
   let desiredVolume = 1;
   let observedAudioElement = null;
   let domObserver = null;
-  let applyQueued = false;
+  let resolveQueued = false;
+  let resolveForce = false;
+
+  function isCloseTo(left, right, epsilon = VOLUME_EPSILON) {
+    return Math.abs(left - right) <= epsilon;
+  }
 
   function collectSearchRoots(root, output) {
     if (!root || !output) {
@@ -23,9 +30,8 @@
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     let currentNode = walker.nextNode();
     while (currentNode) {
-      const shadowRoot = currentNode.shadowRoot;
-      if (shadowRoot) {
-        collectSearchRoots(shadowRoot, output);
+      if (currentNode.shadowRoot) {
+        collectSearchRoots(currentNode.shadowRoot, output);
       }
       currentNode = walker.nextNode();
     }
@@ -37,9 +43,9 @@
 
     for (const root of roots) {
       for (const selector of selectors) {
-        const element = root.querySelector(selector);
-        if (element) {
-          return element;
+        const match = root.querySelector(selector);
+        if (match) {
+          return match;
         }
       }
     }
@@ -52,17 +58,15 @@
       return;
     }
 
-    const localAudioElements = root.querySelectorAll("audio");
-    for (const audioElement of localAudioElements) {
+    for (const audioElement of root.querySelectorAll("audio")) {
       outputSet.add(audioElement);
     }
 
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     let currentNode = walker.nextNode();
     while (currentNode) {
-      const shadowRoot = currentNode.shadowRoot;
-      if (shadowRoot) {
-        collectAudioElements(shadowRoot, outputSet);
+      if (currentNode.shadowRoot) {
+        collectAudioElements(currentNode.shadowRoot, outputSet);
       }
       currentNode = walker.nextNode();
     }
@@ -84,18 +88,16 @@
       return null;
     }
 
-    const activeElement = audioElements.find(
-      (audio) => !audio.paused && !audio.ended && audio.readyState > 0
-    );
-    if (activeElement) {
-      return activeElement;
+    const active = audioElements.find((audio) => !audio.paused && !audio.ended);
+    if (active) {
+      return active;
     }
 
-    const progressElement = audioElements.find(
+    const progressed = audioElements.find(
       (audio) => audio.currentTime > 0 && !audio.ended
     );
-    if (progressElement) {
-      return progressElement;
+    if (progressed) {
+      return progressed;
     }
 
     const withSource = audioElements.find(
@@ -109,34 +111,23 @@
   }
 
   function findMainAudioElement() {
-    const audioElements = getAudioElements();
-    return pickMainAudioElement(audioElements);
+    return pickMainAudioElement(getAudioElements());
   }
 
   function findVolumeRangeInput() {
-    const inputElement = findFirstMatchingElement([
+    const element = findFirstMatchingElement([
       "input[data-testid='volume-bar']",
       "[data-testid='volume-bar'] input[type='range']",
       "input[type='range'][aria-label*='Volume']",
       "input[type='range'][aria-label*='volume']",
     ]);
 
-    return inputElement instanceof HTMLInputElement ? inputElement : null;
-  }
-
-  function findVolumeSlider() {
-    return findFirstMatchingElement([
-      "[data-testid='volume-bar'][role='slider']",
-      "[data-testid='volume-bar'] [role='slider']",
-      "[role='slider'][aria-label*='Volume']",
-      "[role='slider'][aria-label*='volume']",
-    ]);
+    return element instanceof HTMLInputElement ? element : null;
   }
 
   function setNativeInputValue(inputElement, value) {
     const prototype = Object.getPrototypeOf(inputElement);
     const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
-
     if (descriptor && typeof descriptor.set === "function") {
       descriptor.set.call(inputElement, value);
       return;
@@ -145,88 +136,57 @@
     inputElement.value = value;
   }
 
-  function applyVolumeViaRangeInput(volume) {
+  function getVolumeRangeBounds(inputElement) {
+    const min = Number(inputElement.min);
+    const max = Number(inputElement.max);
+    const safeMin = Number.isFinite(min) ? min : 0;
+    const safeMax = Number.isFinite(max) ? max : 1;
+    return { safeMin, safeMax };
+  }
+
+  function getNormalizedInputVolume(inputElement) {
+    const { safeMin, safeMax } = getVolumeRangeBounds(inputElement);
+    if (safeMax <= safeMin) {
+      return null;
+    }
+
+    const current = Number(inputElement.value);
+    if (!Number.isFinite(current)) {
+      return null;
+    }
+
+    return (current - safeMin) / (safeMax - safeMin);
+  }
+
+  function applyVolumeViaRangeInput(volume, force = false) {
     const inputElement = findVolumeRangeInput();
     if (!inputElement) {
       return false;
     }
 
-    const min = Number(inputElement.min);
-    const max = Number(inputElement.max);
-    const safeMin = Number.isFinite(min) ? min : 0;
-    const safeMax = Number.isFinite(max) ? max : 1;
-    const targetNumeric = safeMin + volume * (safeMax - safeMin);
-    const targetValue = String(targetNumeric);
+    const normalizedCurrent = getNormalizedInputVolume(inputElement);
+    if (
+      !force &&
+      normalizedCurrent !== null &&
+      isCloseTo(normalizedCurrent, volume, 0.03)
+    ) {
+      return true;
+    }
 
-    setNativeInputValue(inputElement, targetValue);
+    const { safeMin, safeMax } = getVolumeRangeBounds(inputElement);
+    const targetNumeric = safeMin + volume * (safeMax - safeMin);
+    setNativeInputValue(inputElement, String(targetNumeric));
     inputElement.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
     inputElement.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-
-    const normalizedRange = safeMax - safeMin;
-    if (normalizedRange <= 0) {
-      return true;
-    }
-
-    const currentNumeric = Number(inputElement.value);
-    if (!Number.isFinite(currentNumeric)) {
-      return true;
-    }
-
-    const normalizedCurrent = (currentNumeric - safeMin) / normalizedRange;
-    return Math.abs(normalizedCurrent - volume) <= 0.05;
-  }
-
-  function applyVolumeViaSliderPointer(volume) {
-    const sliderElement = findVolumeSlider();
-    if (!sliderElement) {
-      return false;
-    }
-
-    const rect = sliderElement.getBoundingClientRect();
-    if (rect.width <= 1 || rect.height <= 1) {
-      return false;
-    }
-
-    const clientX = rect.left + rect.width * volume;
-    const clientY = rect.top + rect.height / 2;
-    const baseEventOptions = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      clientX,
-      clientY,
-      buttons: 1,
-    };
-
-    if (typeof PointerEvent === "function") {
-      sliderElement.dispatchEvent(
-        new PointerEvent("pointerdown", { ...baseEventOptions, pointerId: 1 })
-      );
-      sliderElement.dispatchEvent(
-        new PointerEvent("pointermove", { ...baseEventOptions, pointerId: 1 })
-      );
-      sliderElement.dispatchEvent(
-        new PointerEvent("pointerup", { ...baseEventOptions, pointerId: 1 })
-      );
-    }
-
-    sliderElement.dispatchEvent(new MouseEvent("mousedown", baseEventOptions));
-    sliderElement.dispatchEvent(new MouseEvent("mousemove", baseEventOptions));
-    sliderElement.dispatchEvent(new MouseEvent("mouseup", baseEventOptions));
-    sliderElement.dispatchEvent(new MouseEvent("click", baseEventOptions));
 
     return true;
   }
 
-  function applyVolumeViaUiControl(volume) {
-    if (applyVolumeViaRangeInput(volume)) {
+  function applyDirectVolume(audioElement, volume, force = false) {
+    if (!force && isCloseTo(audioElement.volume, volume)) {
       return true;
     }
 
-    return applyVolumeViaSliderPointer(volume);
-  }
-
-  function applyVolume(audioElement, volume) {
     try {
       audioElement.volume = volume;
     } catch (error) {
@@ -237,7 +197,7 @@
       return false;
     }
 
-    if (Math.abs(audioElement.volume - volume) > 0.01) {
+    if (!isCloseTo(audioElement.volume, volume)) {
       console.error(
         "[SpotifyDuck] Direct volume control failed: audio.volume did not update."
       );
@@ -252,15 +212,12 @@
       return;
     }
 
-    observedAudioElement.removeEventListener("play", handleAudioLifecycleEvent);
+    observedAudioElement.removeEventListener("play", handleObservedAudioEvent);
     observedAudioElement.removeEventListener(
       "loadedmetadata",
-      handleAudioLifecycleEvent
+      handleObservedAudioEvent
     );
-    observedAudioElement.removeEventListener(
-      "durationchange",
-      handleAudioLifecycleEvent
-    );
+    observedAudioElement.removeEventListener("emptied", handleObservedAudioEvent);
     observedAudioElement = null;
   }
 
@@ -270,44 +227,48 @@
     }
 
     removeObservedAudioListeners();
-    observedAudioElement = audioElement;
-    observedAudioElement.addEventListener("play", handleAudioLifecycleEvent);
-    observedAudioElement.addEventListener(
-      "loadedmetadata",
-      handleAudioLifecycleEvent
-    );
-    observedAudioElement.addEventListener(
-      "durationchange",
-      handleAudioLifecycleEvent
-    );
-  }
-
-  function tryApplyDesiredVolume() {
-    const audioElement = findMainAudioElement();
-    if (audioElement) {
-      observeAudioElement(audioElement);
-      if (applyVolume(audioElement, desiredVolume)) {
-        return true;
-      }
-    }
-
-    return applyVolumeViaUiControl(desiredVolume);
-  }
-
-  function handleAudioLifecycleEvent() {
-    scheduleApplyDesiredVolume();
-  }
-
-  function scheduleApplyDesiredVolume() {
-    if (applyQueued) {
+    if (!audioElement) {
       return;
     }
 
-    applyQueued = true;
+    observedAudioElement = audioElement;
+    observedAudioElement.addEventListener("play", handleObservedAudioEvent);
+    observedAudioElement.addEventListener("loadedmetadata", handleObservedAudioEvent);
+    observedAudioElement.addEventListener("emptied", handleObservedAudioEvent);
+  }
+
+  function resolveAndApply(force = false) {
+    const audioElement = findMainAudioElement();
+    if (audioElement !== observedAudioElement) {
+      observeAudioElement(audioElement);
+    }
+
+    let directApplied = false;
+    if (audioElement) {
+      directApplied = applyDirectVolume(audioElement, desiredVolume, force);
+    }
+
+    const uiApplied = applyVolumeViaRangeInput(desiredVolume, force);
+    return directApplied || uiApplied;
+  }
+
+  function scheduleResolveAndApply(force = false) {
+    resolveForce = resolveForce || force;
+    if (resolveQueued) {
+      return;
+    }
+
+    resolveQueued = true;
     queueMicrotask(() => {
-      applyQueued = false;
-      void tryApplyDesiredVolume();
+      resolveQueued = false;
+      const forceApply = resolveForce;
+      resolveForce = false;
+      resolveAndApply(forceApply);
     });
+  }
+
+  function handleObservedAudioEvent() {
+    scheduleResolveAndApply(false);
   }
 
   function ensureDomObserver() {
@@ -317,7 +278,11 @@
 
     const root = document.documentElement ?? document;
     domObserver = new MutationObserver(() => {
-      scheduleApplyDesiredVolume();
+      if (observedAudioElement && observedAudioElement.isConnected) {
+        return;
+      }
+
+      scheduleResolveAndApply(false);
     });
     domObserver.observe(root, { childList: true, subtree: true });
   }
@@ -325,11 +290,13 @@
   async function setDesiredVolume(volume) {
     desiredVolume = volume;
     ensureDomObserver();
-    const appliedImmediately = tryApplyDesiredVolume();
-    if (!appliedImmediately) {
-      scheduleApplyDesiredVolume();
+
+    const appliedNow = resolveAndApply(true);
+    if (!appliedNow) {
+      scheduleResolveAndApply(true);
     }
-    return appliedImmediately;
+
+    return true;
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -345,9 +312,7 @@
     }
 
     void setDesiredVolume(volume)
-      .then((success) => {
-        sendResponse({ success });
-      })
+      .then((success) => sendResponse({ success }))
       .catch((error) => {
         console.error("[SpotifyDuck] Unexpected error while setting volume.", error);
         sendResponse({ success: false });

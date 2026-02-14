@@ -63,10 +63,7 @@
   function getPlaybackState() {
     return {
       isPlaying: Boolean(
-        currentVideo &&
-          !currentVideo.paused &&
-          !currentVideo.ended &&
-          currentVideo.readyState > 0
+        currentVideo && !currentVideo.paused && !currentVideo.ended
       ),
       onVideoPage: isVideoPage(),
       url: window.location.href,
