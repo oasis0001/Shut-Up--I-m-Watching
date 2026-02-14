@@ -9,12 +9,18 @@
   });
 
   const VOLUME_EPSILON = 0.02;
+  const UI_VOLUME_EPSILON = 0.03;
+  const VOLUME_UNITS_PER_SECOND = 3.0;
+  const TRANSITION_TICK_MS = 32;
+  const MAX_EFFECTIVE_DELTA_MS = 120;
 
   let desiredVolume = 1;
   let observedAudioElement = null;
   let domObserver = null;
-  let resolveQueued = false;
-  let resolveForce = false;
+  let transitionTimerId = null;
+  let transitionQueued = false;
+  let lastTransitionTimestamp = 0;
+  let directFailureLogged = false;
 
   function isCloseTo(left, right, epsilon = VOLUME_EPSILON) {
     return Math.abs(left - right) <= epsilon;
@@ -158,17 +164,15 @@
     return (current - safeMin) / (safeMax - safeMin);
   }
 
-  function applyVolumeViaRangeInput(volume, force = false) {
-    const inputElement = findVolumeRangeInput();
+  function applyVolumeViaRangeInput(inputElement, volume, final) {
     if (!inputElement) {
       return false;
     }
 
-    const normalizedCurrent = getNormalizedInputVolume(inputElement);
+    const currentNormalized = getNormalizedInputVolume(inputElement);
     if (
-      !force &&
-      normalizedCurrent !== null &&
-      isCloseTo(normalizedCurrent, volume, 0.03)
+      currentNormalized !== null &&
+      isCloseTo(currentNormalized, volume, UI_VOLUME_EPSILON)
     ) {
       return true;
     }
@@ -177,33 +181,47 @@
     const targetNumeric = safeMin + volume * (safeMax - safeMin);
     setNativeInputValue(inputElement, String(targetNumeric));
     inputElement.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-    inputElement.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    if (final) {
+      inputElement.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    }
 
     return true;
   }
 
-  function applyDirectVolume(audioElement, volume, force = false) {
-    if (!force && isCloseTo(audioElement.volume, volume)) {
+  function applyDirectVolume(audioElement, volume) {
+    if (!audioElement) {
+      return false;
+    }
+
+    if (isCloseTo(audioElement.volume, volume)) {
+      directFailureLogged = false;
       return true;
     }
 
     try {
       audioElement.volume = volume;
     } catch (error) {
-      console.error(
-        "[SpotifyDuck] Direct volume control failed while writing to audio.volume.",
-        error
-      );
+      if (!directFailureLogged) {
+        console.error(
+          "[SpotifyDuck] Direct volume control failed while writing to audio.volume.",
+          error
+        );
+        directFailureLogged = true;
+      }
       return false;
     }
 
     if (!isCloseTo(audioElement.volume, volume)) {
-      console.error(
-        "[SpotifyDuck] Direct volume control failed: audio.volume did not update."
-      );
+      if (!directFailureLogged) {
+        console.error(
+          "[SpotifyDuck] Direct volume control failed: audio.volume did not update."
+        );
+        directFailureLogged = true;
+      }
       return false;
     }
 
+    directFailureLogged = false;
     return true;
   }
 
@@ -222,7 +240,7 @@
   }
 
   function observeAudioElement(audioElement) {
-    if (observedAudioElement === audioElement) {
+    if (audioElement === observedAudioElement) {
       return;
     }
 
@@ -237,38 +255,116 @@
     observedAudioElement.addEventListener("emptied", handleObservedAudioEvent);
   }
 
-  function resolveAndApply(force = false) {
+  function resolveControls() {
     const audioElement = findMainAudioElement();
-    if (audioElement !== observedAudioElement) {
-      observeAudioElement(audioElement);
-    }
-
-    let directApplied = false;
-    if (audioElement) {
-      directApplied = applyDirectVolume(audioElement, desiredVolume, force);
-    }
-
-    const uiApplied = applyVolumeViaRangeInput(desiredVolume, force);
-    return directApplied || uiApplied;
+    observeAudioElement(audioElement);
+    const rangeInput = findVolumeRangeInput();
+    return { audioElement, rangeInput };
   }
 
-  function scheduleResolveAndApply(force = false) {
-    resolveForce = resolveForce || force;
-    if (resolveQueued) {
+  function readCurrentVolume(controls) {
+    if (
+      controls.audioElement &&
+      Number.isFinite(controls.audioElement.volume) &&
+      controls.audioElement.volume >= 0 &&
+      controls.audioElement.volume <= 1
+    ) {
+      return controls.audioElement.volume;
+    }
+
+    if (controls.rangeInput) {
+      const normalized = getNormalizedInputVolume(controls.rangeInput);
+      if (normalized !== null) {
+        return normalized;
+      }
+    }
+
+    return null;
+  }
+
+  function applyVolumeStep(controls, volume, final) {
+    const directApplied = applyDirectVolume(controls.audioElement, volume);
+    if (directApplied) {
+      if (final && controls.rangeInput) {
+        applyVolumeViaRangeInput(controls.rangeInput, volume, true);
+      }
+      return true;
+    }
+
+    return applyVolumeViaRangeInput(controls.rangeInput, volume, final);
+  }
+
+  function stopTransition() {
+    if (transitionTimerId !== null) {
+      clearTimeout(transitionTimerId);
+      transitionTimerId = null;
+    }
+
+    lastTransitionTimestamp = 0;
+  }
+
+  function scheduleTransition() {
+    if (transitionQueued) {
       return;
     }
 
-    resolveQueued = true;
+    transitionQueued = true;
     queueMicrotask(() => {
-      resolveQueued = false;
-      const forceApply = resolveForce;
-      resolveForce = false;
-      resolveAndApply(forceApply);
+      transitionQueued = false;
+      if (transitionTimerId !== null) {
+        return;
+      }
+
+      lastTransitionTimestamp = 0;
+      transitionTimerId = setTimeout(runTransitionFrame, 0);
     });
   }
 
+  function runTransitionFrame() {
+    transitionTimerId = null;
+    const now = performance.now();
+
+    const controls = resolveControls();
+    if (!controls.audioElement && !controls.rangeInput) {
+      stopTransition();
+      return;
+    }
+
+    const currentVolume = readCurrentVolume(controls);
+    if (currentVolume === null) {
+      applyVolumeStep(controls, desiredVolume, true);
+      stopTransition();
+      return;
+    }
+
+    const rawDeltaMs = lastTransitionTimestamp
+      ? Math.max(1, now - lastTransitionTimestamp)
+      : TRANSITION_TICK_MS;
+    const deltaMs = Math.min(rawDeltaMs, MAX_EFFECTIVE_DELTA_MS);
+    lastTransitionTimestamp = now;
+
+    const difference = desiredVolume - currentVolume;
+    if (Math.abs(difference) <= VOLUME_EPSILON) {
+      applyVolumeStep(controls, desiredVolume, true);
+      stopTransition();
+      return;
+    }
+
+    const maxStep = (VOLUME_UNITS_PER_SECOND * deltaMs) / 1000;
+    const nextVolume =
+      currentVolume + Math.sign(difference) * Math.min(Math.abs(difference), maxStep);
+
+    const applied = applyVolumeStep(controls, nextVolume, false);
+    if (!applied) {
+      stopTransition();
+      return;
+    }
+
+    transitionTimerId = setTimeout(runTransitionFrame, TRANSITION_TICK_MS);
+  }
+
   function handleObservedAudioEvent() {
-    scheduleResolveAndApply(false);
+    scheduleTransition();
   }
 
   function ensureDomObserver() {
@@ -278,11 +374,13 @@
 
     const root = document.documentElement ?? document;
     domObserver = new MutationObserver(() => {
-      if (observedAudioElement && observedAudioElement.isConnected) {
+      if (transitionTimerId !== null) {
         return;
       }
 
-      scheduleResolveAndApply(false);
+      if (!observedAudioElement || !observedAudioElement.isConnected) {
+        scheduleTransition();
+      }
     });
     domObserver.observe(root, { childList: true, subtree: true });
   }
@@ -290,12 +388,7 @@
   async function setDesiredVolume(volume) {
     desiredVolume = volume;
     ensureDomObserver();
-
-    const appliedNow = resolveAndApply(true);
-    if (!appliedNow) {
-      scheduleResolveAndApply(true);
-    }
-
+    scheduleTransition();
     return true;
   }
 

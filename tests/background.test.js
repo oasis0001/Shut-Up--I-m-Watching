@@ -12,6 +12,7 @@ const BACKGROUND_SCRIPT = fs.readFileSync(
 
 const YOUTUBE_WATCH_URL = "https://www.youtube.com/watch?v=test-video";
 const SPOTIFY_URL = "https://open.spotify.com/";
+const DUCKED_VOLUME = 0.3;
 
 class FakeChromeEvent {
   constructor() {
@@ -323,13 +324,19 @@ test("lowers Spotify when active YouTube video plays and restores on pause", asy
   });
 
   const lowered = await waitFor(() =>
-    chrome.spotifyCommands.some((command) => command.volume === 0.5 && command.success)
+    chrome.spotifyCommands.some(
+      (command) => command.volume === DUCKED_VOLUME && command.success
+    )
   );
-  assert.equal(lowered, true, "expected Spotify volume to be lowered to 0.5");
+  assert.equal(
+    lowered,
+    true,
+    `expected Spotify volume to be lowered to ${DUCKED_VOLUME}`
+  );
 
   const loweredIndex = findLastIndex(
     chrome.spotifyCommands,
-    (command) => command.volume === 0.5 && command.success
+    (command) => command.volume === DUCKED_VOLUME && command.success
   );
 
   chrome.dispatchYouTubePlaybackState(2, {
@@ -371,7 +378,7 @@ test("does not lower Spotify when YouTube is playing in a background tab", async
   await sleep(600);
 
   const loweredCommands = chrome.spotifyCommands.filter(
-    (command) => command.volume === 0.5 && command.success
+    (command) => command.volume === DUCKED_VOLUME && command.success
   );
   assert.equal(loweredCommands.length, 0);
 });
@@ -399,14 +406,18 @@ test("retries Spotify volume update after transient failures", async () => {
   });
 
   const firstFailure = await waitFor(() =>
-    chrome.spotifyCommands.some((command) => command.volume === 0.5 && !command.success)
+    chrome.spotifyCommands.some(
+      (command) => command.volume === DUCKED_VOLUME && !command.success
+    )
   );
   assert.equal(firstFailure, true, "expected at least one failed lowering attempt");
 
   acceptsCommands = true;
 
   const eventuallySucceeded = await waitFor(() =>
-    chrome.spotifyCommands.some((command) => command.volume === 0.5 && command.success),
+    chrome.spotifyCommands.some(
+      (command) => command.volume === DUCKED_VOLUME && command.success
+    ),
     3500
   );
   assert.equal(
@@ -437,13 +448,15 @@ test("restores volume when the active YouTube tab closes", async () => {
   });
 
   const lowered = await waitFor(() =>
-    chrome.spotifyCommands.some((command) => command.volume === 0.5 && command.success)
+    chrome.spotifyCommands.some(
+      (command) => command.volume === DUCKED_VOLUME && command.success
+    )
   );
   assert.equal(lowered, true, "expected lowered state before closing tab");
 
   const loweredIndex = findLastIndex(
     chrome.spotifyCommands,
-    (command) => command.volume === 0.5 && command.success
+    (command) => command.volume === DUCKED_VOLUME && command.success
   );
 
   chrome.removeTab(2);
@@ -485,7 +498,10 @@ test("applies desired lowered volume when Spotify tab opens after ducking starte
 
   const lowered = await waitFor(() =>
     chrome.spotifyCommands.some(
-      (command) => command.tabId === 3 && command.volume === 0.5 && command.success
+      (command) =>
+        command.tabId === 3 &&
+        command.volume === DUCKED_VOLUME &&
+        command.success
     )
   );
   assert.equal(lowered, true, "expected new Spotify tab to receive desired volume");
