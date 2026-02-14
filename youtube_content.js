@@ -25,6 +25,7 @@
   const URL_CHANGE_EVENT = "spotify-duck:url-change";
 
   let currentVideo = null;
+  let trackedVideos = new Set();
   let stateQueued = false;
   let lastSentSignature = "";
   let trackedUrl = window.location.href;
@@ -61,6 +62,8 @@
   }
 
   function getPlaybackState() {
+    currentVideo = pickPreferredVideoElement(listVideoElements());
+
     return {
       isPlaying: Boolean(
         currentVideo && !currentVideo.paused && !currentVideo.ended
@@ -149,7 +152,10 @@
     });
   }
 
-  function onPlaybackEvent() {
+  function onPlaybackEvent(event) {
+    if (event?.target instanceof HTMLVideoElement) {
+      currentVideo = event.target;
+    }
     scheduleStateSend();
   }
 
@@ -165,29 +171,80 @@
     }
   }
 
-  function findVideoElement() {
-    return (
-      document.querySelector("video.html5-main-video") ||
-      document.querySelector("video")
+  function listVideoElements() {
+    return Array.from(document.querySelectorAll("video"));
+  }
+
+  function getVideoArea(videoElement) {
+    const rect = videoElement.getBoundingClientRect();
+    return Math.max(0, rect.width) * Math.max(0, rect.height);
+  }
+
+  function isVideoVisible(videoElement) {
+    const rect = videoElement.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) {
+      return false;
+    }
+
+    const styles = window.getComputedStyle(videoElement);
+    return styles.display !== "none" && styles.visibility !== "hidden";
+  }
+
+  function pickPreferredVideoElement(videoElements) {
+    if (videoElements.length === 0) {
+      return null;
+    }
+
+    const visiblePlaying = videoElements.find(
+      (videoElement) =>
+        !videoElement.paused && !videoElement.ended && isVideoVisible(videoElement)
     );
+    if (visiblePlaying) {
+      return visiblePlaying;
+    }
+
+    const anyPlaying = videoElements.find(
+      (videoElement) => !videoElement.paused && !videoElement.ended
+    );
+    if (anyPlaying) {
+      return anyPlaying;
+    }
+
+    const visibleCandidates = videoElements
+      .filter(isVideoVisible)
+      .sort((left, right) => getVideoArea(right) - getVideoArea(left));
+
+    if (visibleCandidates.length > 0) {
+      return visibleCandidates[0];
+    }
+
+    return videoElements[0];
   }
 
   function refreshVideoBinding() {
-    const nextVideo = findVideoElement();
-    if (nextVideo === currentVideo) {
+    const nextVideos = listVideoElements();
+    const nextVideoSet = new Set(nextVideos);
+
+    for (const previousVideo of trackedVideos) {
+      if (!nextVideoSet.has(previousVideo)) {
+        removeVideoListeners(previousVideo);
+      }
+    }
+
+    for (const nextVideo of nextVideoSet) {
+      if (!trackedVideos.has(nextVideo)) {
+        addVideoListeners(nextVideo);
+      }
+    }
+
+    trackedVideos = nextVideoSet;
+
+    const nextCurrentVideo = pickPreferredVideoElement(nextVideos);
+    if (nextCurrentVideo === currentVideo) {
       return;
     }
 
-    if (currentVideo) {
-      removeVideoListeners(currentVideo);
-    }
-
-    currentVideo = nextVideo;
-
-    if (currentVideo) {
-      addVideoListeners(currentVideo);
-    }
-
+    currentVideo = nextCurrentVideo;
     scheduleStateSend();
   }
 
