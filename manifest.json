@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Shut Up, I’m Watching",
+  "version": "1.0.0",
+  "description": "Automatically lowers Spotify Web Player volume while an active YouTube video is playing.",
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": [
+    "*://www.youtube.com/*",
+    "*://youtube.com/*",
+    "*://m.youtube.com/*",
+    "*://open.spotify.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.youtube.com/*",
+        "*://youtube.com/*",
+        "*://m.youtube.com/*"
+      ],
+      "js": ["youtube_content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://open.spotify.com/*"],
+      "js": ["spotify_content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
