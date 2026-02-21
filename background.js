@@ -1,6 +1,6 @@
 const DEBOUNCE_MS = 300;
 const RETRY_AFTER_FAILED_BROADCAST_MS = 1000;
-const REDUCED_VOLUME = 0.3;
+const REDUCED_VOLUME = 0.4;
 const FULL_VOLUME = 1.0;
 const MODE_STORAGE_KEY = "duckMode";
 const MODE_DUCK = "duck";
