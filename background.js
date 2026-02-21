@@ -1,12 +1,18 @@
 const DEBOUNCE_MS = 300;
 const RETRY_AFTER_FAILED_BROADCAST_MS = 1000;
-const REDUCED_VOLUME = 0.4;
+const REDUCED_VOLUME = 0.3;
 const FULL_VOLUME = 1.0;
+const MODE_STORAGE_KEY = "duckMode";
+const MODE_DUCK = "duck";
+const MODE_PAUSE = "pause";
+const STORAGE_AREA = chrome.storage?.local ?? chrome.storage?.sync;
 
 const MESSAGE_TYPES = Object.freeze({
   YOUTUBE_STATE: "YOUTUBE_PLAYBACK_STATE",
   GET_YOUTUBE_STATE: "GET_YOUTUBE_STATE",
   SET_SPOTIFY_VOLUME: "SET_SPOTIFY_VOLUME",
+  PAUSE_SPOTIFY: "PAUSE_SPOTIFY",
+  RESUME_SPOTIFY: "RESUME_SPOTIFY",
 });
 
 const CONTENT_SCRIPTS = Object.freeze({
@@ -29,7 +35,9 @@ let evaluationTimer = null;
 let retryTimer = null;
 let desiredSpotifyVolume = FULL_VOLUME;
 let lastBroadcastVolume = null;
+let lastPauseState = null;
 let activeTabId = null;
+let currentMode = MODE_DUCK;
 
 function parseUrl(urlString) {
   try {
@@ -186,6 +194,40 @@ async function getActiveTab() {
   return tab ?? null;
 }
 
+function loadModeFromStorage() {
+  if (!STORAGE_AREA) {
+    return;
+  }
+
+  STORAGE_AREA.get({ [MODE_STORAGE_KEY]: MODE_DUCK }, (result) => {
+    const nextMode =
+      result?.[MODE_STORAGE_KEY] === MODE_PAUSE ? MODE_PAUSE : MODE_DUCK;
+    updateMode(nextMode);
+  });
+}
+
+function updateMode(nextMode) {
+  if (nextMode !== MODE_DUCK && nextMode !== MODE_PAUSE) {
+    return;
+  }
+
+  if (nextMode === currentMode) {
+    return;
+  }
+
+  currentMode = nextMode;
+  lastPauseState = null;
+  if (currentMode === MODE_PAUSE) {
+    void broadcastSpotifyVolume(FULL_VOLUME).then(() => {
+      lastBroadcastVolume = FULL_VOLUME;
+      scheduleVolumeEvaluation();
+    });
+  } else {
+    void broadcastSpotifyPlayback(MESSAGE_TYPES.RESUME_SPOTIFY);
+    scheduleVolumeEvaluation();
+  }
+}
+
 async function requestYouTubeState(tabId) {
   try {
     const response = await sendMessageWithAutoInjection(
@@ -246,6 +288,46 @@ async function setSpotifyVolumeForTab(tabId, volume) {
   }
 }
 
+async function setSpotifyPlaybackForTab(tabId, type) {
+  try {
+    const response = await sendMessageWithAutoInjection(
+      tabId,
+      { type },
+      CONTENT_SCRIPTS.SPOTIFY
+    );
+    return response?.success === true;
+  } catch (error) {
+    console.warn(
+      `[SpotifyDuck] Unable to ${type.toLowerCase()} in Spotify tab ${tabId}.`,
+      error
+    );
+    return false;
+  }
+}
+
+async function broadcastSpotifyPlayback(type) {
+  const spotifyTabs = await chrome.tabs.query({
+    url: URL_MATCHES.SPOTIFY,
+  });
+
+  if (spotifyTabs.length === 0) {
+    return { applied: false, noSpotifyTabs: true };
+  }
+
+  const results = await Promise.all(
+    spotifyTabs
+      .map((tab) => tab.id)
+      .filter((tabId) => typeof tabId === "number")
+      .map((tabId) => setSpotifyPlaybackForTab(tabId, type))
+  );
+
+  const anySuccess = results.some(Boolean);
+  if (!anySuccess) {
+    console.warn("[SpotifyDuck] No Spotify tab accepted the playback command.");
+  }
+  return { applied: anySuccess, noSpotifyTabs: false };
+}
+
 async function broadcastSpotifyVolume(volume) {
   const spotifyTabs = await chrome.tabs.query({
     url: URL_MATCHES.SPOTIFY,
@@ -272,6 +354,33 @@ async function broadcastSpotifyVolume(volume) {
 async function evaluateAndApplyVolume() {
   try {
     const shouldReduce = await shouldReduceSpotifyVolume();
+    if (currentMode === MODE_PAUSE) {
+      desiredSpotifyVolume = FULL_VOLUME;
+      if (lastBroadcastVolume !== FULL_VOLUME) {
+        void broadcastSpotifyVolume(FULL_VOLUME).then(() => {
+          lastBroadcastVolume = FULL_VOLUME;
+        });
+      }
+
+      const nextPauseState = shouldReduce;
+      if (nextPauseState === lastPauseState) {
+        clearRetryEvaluation();
+        return;
+      }
+
+      const broadcastResult = await broadcastSpotifyPlayback(
+        nextPauseState ? MESSAGE_TYPES.PAUSE_SPOTIFY : MESSAGE_TYPES.RESUME_SPOTIFY
+      );
+      if (broadcastResult.applied || broadcastResult.noSpotifyTabs) {
+        lastPauseState = nextPauseState;
+        clearRetryEvaluation();
+        return;
+      }
+
+      scheduleRetryEvaluation();
+      return;
+    }
+
     const targetVolume = shouldReduce ? REDUCED_VOLUME : FULL_VOLUME;
     desiredSpotifyVolume = targetVolume;
 
@@ -382,12 +491,29 @@ chrome.windows.onFocusChanged.addListener(() => {
 
 chrome.runtime.onInstalled.addListener(() => {
   void injectScriptsIntoExistingTabs();
+  loadModeFromStorage();
   scheduleVolumeEvaluation();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void injectScriptsIntoExistingTabs();
+  loadModeFromStorage();
   scheduleVolumeEvaluation();
 });
 
+if (chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (
+      !changes[MODE_STORAGE_KEY] ||
+      (STORAGE_AREA === chrome.storage?.local && areaName !== "local") ||
+      (STORAGE_AREA === chrome.storage?.sync && areaName !== "sync")
+    ) {
+      return;
+    }
+    const nextValue = changes[MODE_STORAGE_KEY].newValue;
+    updateMode(nextValue);
+  });
+}
+
+loadModeFromStorage();
 scheduleVolumeEvaluation();

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&display=swap');
+
+  :root {
+    --bg-color: #FAFAFA;
+    --text-main: #2C2C2C;
+    --text-muted: #757575;
+    --toggle-bg: #EAEAEA;
+  }
+
+  body {
+    width: 280px; /* Reduced width for a tighter rectangle */
+    margin: 0;
+    padding: 16px; /* Tighter padding overall */
+    font-family: 'Lora', Georgia, serif;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    box-sizing: border-box;
+  }
+
+  /* Header & Logo styling: Now horizontal */
+  .header {
+    display: flex;
+    flex-direction: row; /* Side-by-side layout */
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  .logo {
+    width: 48px; /* Smaller duck */
+    height: 48px;
+    margin-right: 12px; /* Space between duck and text */
+  }
+
+  .title {
+    font-size: 1.1rem; /* Slightly smaller to fit gracefully */
+    font-weight: 600;
+    margin: 0;
+    line-height: 1.2;
+    letter-spacing: -0.5px;
+    text-align: left;
+  }
+
+  .title i {
+    font-weight: 400;
+    color: var(--text-muted);
+  }
+
+  /* Compact Segmented Toggle Switch */
+  .segmented-control {
+    position: relative;
+    display: flex;
+    background-color: var(--toggle-bg);
+    border-radius: 30px;
+    padding: 4px;
+  }
+
+  .segmented-control input[type="radio"] {
+    display: none;
+  }
+
+  .segmented-control label {
+    flex: 1;
+    text-align: center;
+    padding: 8px 0; /* Tighter vertical padding */
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    z-index: 2;
+    transition: color 0.3s ease;
+    font-family: 'Lora', Georgia, serif;
+  }
+
+  /* The sliding background pill */
+  .slider {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: calc(50% - 4px);
+    height: calc(100% - 8px);
+    background-color: white;
+    border-radius: 26px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    z-index: 1;
+    transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  }
+
+  /* Logic for the slider movement */
+  #pause:checked ~ .slider {
+    transform: translateX(100%);
+  }
+
+  #low-vol:checked ~ .slider {
+    transform: translateX(0);
+  }
+
+  /* Active text color */
+  #low-vol:checked ~ label[for="low-vol"],
+  #pause:checked ~ label[for="pause"] {
+    color: var(--text-main);
+  }
+
+  label[for="low-vol"], 
+  label[for="pause"] {
+    color: var(--text-muted);
+  }
+
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <img src="icon.png" alt="Listening Duck" class="logo">
+    <h1 class="title">shut up,<br><i>I am watching</i></h1>
+  </div>
+
+  <div class="segmented-control">
+    <input type="radio" id="low-vol" name="playback-mode" value="low">
+    <label for="low-vol">Lower Volume</label>
+    
+    <input type="radio" id="pause" name="playback-mode" value="pause" checked>
+    <label for="pause">Pause Spotify</label>
+    
+    <div class="slider"></div>
+  </div>
+
+  <script>
+    // Logic to save the user's choice goes here
+    const radios = document.querySelectorAll('input[name="playback-mode"]');
+    radios.forEach(radio => {
+      radio.addEventListener('change', (e) => {
+        const selectedMode = e.target.value;
+        // console.log("Mode set to:", selectedMode);
+      });
+    });
+  </script>
+
+</body>
+</html>

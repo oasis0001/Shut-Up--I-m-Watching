@@ -4,23 +4,29 @@
   }
   window.__spotifyDuckSpotifyInitialized = true;
 
-  const MESSAGE_TYPES = Object.freeze({
-    SET_SPOTIFY_VOLUME: "SET_SPOTIFY_VOLUME",
-  });
+const MESSAGE_TYPES = Object.freeze({
+  SET_SPOTIFY_VOLUME: "SET_SPOTIFY_VOLUME",
+  PAUSE_SPOTIFY: "PAUSE_SPOTIFY",
+  RESUME_SPOTIFY: "RESUME_SPOTIFY",
+});
 
   const VOLUME_EPSILON = 0.02;
   const UI_VOLUME_EPSILON = 0.03;
   const VOLUME_UNITS_PER_SECOND = 3.0;
   const TRANSITION_TICK_MS = 32;
   const MAX_EFFECTIVE_DELTA_MS = 120;
+  const PLAYBACK_RETRY_MS = 200;
 
-  let desiredVolume = 1;
-  let observedAudioElement = null;
-  let domObserver = null;
-  let transitionTimerId = null;
-  let transitionQueued = false;
-  let lastTransitionTimestamp = 0;
-  let directFailureLogged = false;
+let desiredVolume = 1;
+let observedAudioElement = null;
+let domObserver = null;
+let transitionTimerId = null;
+let transitionQueued = false;
+let lastTransitionTimestamp = 0;
+let directFailureLogged = false;
+let pausedByExtension = false;
+  let pendingPlaybackAction = null;
+  let playbackRetryTimerId = null;
 
   function isCloseTo(left, right, epsilon = VOLUME_EPSILON) {
     return Math.abs(left - right) <= epsilon;
@@ -365,9 +371,10 @@
 
   function handleObservedAudioEvent() {
     scheduleTransition();
+    applyPlaybackAction();
   }
 
-  function ensureDomObserver() {
+function ensureDomObserver() {
     if (domObserver) {
       return;
     }
@@ -381,36 +388,194 @@
       if (!observedAudioElement || !observedAudioElement.isConnected) {
         scheduleTransition();
       }
+
+      if (pendingPlaybackAction) {
+        applyPlaybackAction();
+      }
     });
     domObserver.observe(root, { childList: true, subtree: true });
+}
+
+  function getPlaybackAudioElement() {
+    return findMainAudioElement();
   }
 
-  async function setDesiredVolume(volume) {
-    desiredVolume = volume;
-    ensureDomObserver();
-    scheduleTransition();
+  function findPlayPauseButton() {
+    const element = findFirstMatchingElement([
+      "button[data-testid='control-button-playpause']",
+      "button[aria-label='Pause']",
+      "button[aria-label='Play']",
+      "button[aria-label*='Pause']",
+      "button[aria-label*='Play']",
+    ]);
+
+    return element instanceof HTMLButtonElement ? element : null;
+  }
+
+  function getButtonState(button) {
+    if (!button) {
+      return null;
+    }
+
+    const label = (button.getAttribute("aria-label") || "").toLowerCase();
+    if (label.includes("pause")) {
+      return "playing";
+    }
+    if (label.includes("play")) {
+      return "paused";
+    }
+    return null;
+  }
+
+  function pauseWithButton() {
+    const button = findPlayPauseButton();
+    if (!button) {
+      return false;
+    }
+    if (getButtonState(button) === "paused") {
+      return true;
+    }
+    button.click();
     return true;
   }
+
+  function resumeWithButton() {
+    const button = findPlayPauseButton();
+    if (!button) {
+      return false;
+    }
+    if (getButtonState(button) === "playing") {
+      return true;
+    }
+    button.click();
+    return true;
+  }
+
+  function pauseSpotify(audioElement) {
+    if (audioElement && !audioElement.paused) {
+      audioElement.pause();
+      if (audioElement.paused) {
+        pausedByExtension = true;
+        return true;
+      }
+    }
+
+    if (pauseWithButton()) {
+      pausedByExtension = true;
+      return true;
+    }
+
+    return false;
+  }
+
+  function resumeSpotify(audioElement) {
+    if (!pausedByExtension) {
+      return true;
+    }
+
+    let resumed = false;
+    if (audioElement && audioElement.paused) {
+      const playPromise = audioElement.play();
+      resumed = true;
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch((error) => {
+          console.error("[SpotifyDuck] Failed to resume Spotify playback.", error);
+        });
+      }
+    }
+
+    if (!resumed) {
+      resumed = resumeWithButton();
+    }
+
+    if (resumed) {
+      pausedByExtension = false;
+    }
+
+    return resumed;
+  }
+
+  function applyPlaybackAction() {
+    if (!pendingPlaybackAction) {
+      return;
+    }
+
+    const audioElement = getPlaybackAudioElement();
+
+    if (pendingPlaybackAction === MESSAGE_TYPES.PAUSE_SPOTIFY) {
+      if (pauseSpotify(audioElement)) {
+        pendingPlaybackAction = null;
+        clearPlaybackRetry();
+      }
+      schedulePlaybackRetry();
+      return;
+    }
+
+    if (pendingPlaybackAction === MESSAGE_TYPES.RESUME_SPOTIFY) {
+      if (resumeSpotify(audioElement)) {
+        pendingPlaybackAction = null;
+        clearPlaybackRetry();
+      }
+      schedulePlaybackRetry();
+    }
+  }
+
+  function clearPlaybackRetry() {
+    if (playbackRetryTimerId !== null) {
+      clearTimeout(playbackRetryTimerId);
+      playbackRetryTimerId = null;
+    }
+  }
+
+  function schedulePlaybackRetry() {
+    if (!pendingPlaybackAction || playbackRetryTimerId !== null) {
+      return;
+    }
+
+    playbackRetryTimerId = setTimeout(() => {
+      playbackRetryTimerId = null;
+      applyPlaybackAction();
+    }, PLAYBACK_RETRY_MS);
+  }
+
+async function setDesiredVolume(volume) {
+  desiredVolume = volume;
+  ensureDomObserver();
+  scheduleTransition();
+  return true;
+}
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (!message || message.type !== MESSAGE_TYPES.SET_SPOTIFY_VOLUME) {
+    if (!message) {
       return;
     }
 
-    const volume = Number(message.volume);
-    if (!Number.isFinite(volume) || volume < 0 || volume > 1) {
-      console.error("[SpotifyDuck] Received invalid volume value:", message.volume);
-      sendResponse({ success: false });
-      return;
-    }
-
-    void setDesiredVolume(volume)
-      .then((success) => sendResponse({ success }))
-      .catch((error) => {
-        console.error("[SpotifyDuck] Unexpected error while setting volume.", error);
+    if (message.type === MESSAGE_TYPES.SET_SPOTIFY_VOLUME) {
+      const volume = Number(message.volume);
+      if (!Number.isFinite(volume) || volume < 0 || volume > 1) {
+        console.error("[SpotifyDuck] Received invalid volume value:", message.volume);
         sendResponse({ success: false });
-      });
+        return;
+      }
 
-    return true;
+      void setDesiredVolume(volume)
+        .then((success) => sendResponse({ success }))
+        .catch((error) => {
+          console.error("[SpotifyDuck] Unexpected error while setting volume.", error);
+          sendResponse({ success: false });
+        });
+
+      return true;
+    }
+
+    if (
+      message.type === MESSAGE_TYPES.PAUSE_SPOTIFY ||
+      message.type === MESSAGE_TYPES.RESUME_SPOTIFY
+    ) {
+      pendingPlaybackAction = message.type;
+      applyPlaybackAction();
+      sendResponse({ success: true });
+      return;
+    }
   });
 })();

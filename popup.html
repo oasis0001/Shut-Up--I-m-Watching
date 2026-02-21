@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Shut Up, I’m Watching</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="panel">
+      <div class="header">
+        <img src="icon.png" alt="Listening Duck" class="logo" />
+        <h1 class="title">shut up,<br /><i>I am watching</i></h1>
+      </div>
+
+      <div class="segmented-control">
+        <input type="radio" id="low-vol" name="playback-mode" value="low" />
+        <label for="low-vol">Lower Volume</label>
+
+        <input type="radio" id="pause" name="playback-mode" value="pause" />
+        <label for="pause">Pause Spotify</label>
+
+        <div class="slider"></div>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
