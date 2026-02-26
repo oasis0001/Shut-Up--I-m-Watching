@@ -1,6 +1,6 @@
 const DEBOUNCE_MS = 300;
 const RETRY_AFTER_FAILED_BROADCAST_MS = 1000;
-const REDUCED_VOLUME = 0.4;
+const REDUCED_VOLUME = 0.3;
 const FULL_VOLUME = 1.0;
 const MODE_STORAGE_KEY = "duckMode";
 const MODE_DUCK = "duck";
@@ -10,6 +10,8 @@ const STORAGE_AREA = chrome.storage?.local ?? chrome.storage?.sync;
 const MESSAGE_TYPES = Object.freeze({
   YOUTUBE_STATE: "YOUTUBE_PLAYBACK_STATE",
   GET_YOUTUBE_STATE: "GET_YOUTUBE_STATE",
+  INSTAGRAM_STATE: "INSTAGRAM_PLAYBACK_STATE",
+  GET_INSTAGRAM_STATE: "GET_INSTAGRAM_STATE",
   SET_SPOTIFY_VOLUME: "SET_SPOTIFY_VOLUME",
   PAUSE_SPOTIFY: "PAUSE_SPOTIFY",
   RESUME_SPOTIFY: "RESUME_SPOTIFY",
@@ -17,6 +19,7 @@ const MESSAGE_TYPES = Object.freeze({
 
 const CONTENT_SCRIPTS = Object.freeze({
   YOUTUBE: "youtube_content.js",
+  INSTAGRAM: "instagram_content.js",
   SPOTIFY: "spotify_content.js",
 });
 
@@ -26,10 +29,16 @@ const URL_MATCHES = Object.freeze({
     "*://youtube.com/*",
     "*://m.youtube.com/*",
   ],
+  INSTAGRAM: [
+    "*://www.instagram.com/*",
+    "*://instagram.com/*",
+    "*://m.instagram.com/*",
+  ],
   SPOTIFY: ["*://open.spotify.com/*"],
 });
 
 const youtubeTabStates = new Map();
+const instagramTabStates = new Map();
 
 let evaluationTimer = null;
 let retryTimer = null;
@@ -55,9 +64,22 @@ function isYouTubeHost(hostname) {
   );
 }
 
+function isInstagramHost(hostname) {
+  return (
+    hostname === "instagram.com" ||
+    hostname === "www.instagram.com" ||
+    hostname === "m.instagram.com"
+  );
+}
+
 function isYouTubeUrl(urlString) {
   const parsed = parseUrl(urlString);
   return Boolean(parsed && isYouTubeHost(parsed.hostname.toLowerCase()));
+}
+
+function isInstagramUrl(urlString) {
+  const parsed = parseUrl(urlString);
+  return Boolean(parsed && isInstagramHost(parsed.hostname.toLowerCase()));
 }
 
 function isYouTubeVideoUrl(urlString) {
@@ -72,12 +94,21 @@ function isYouTubeVideoUrl(urlString) {
   );
 }
 
+function isInstagramVideoUrl(urlString) {
+  const parsed = parseUrl(urlString);
+  if (!parsed || !isInstagramHost(parsed.hostname.toLowerCase())) {
+    return false;
+  }
+
+  return true;
+}
+
 function isSpotifyUrl(urlString) {
   const parsed = parseUrl(urlString);
   return Boolean(parsed && parsed.hostname.toLowerCase() === "open.spotify.com");
 }
 
-function normalizeYouTubeState(response) {
+function normalizePlaybackState(response) {
   if (
     !response ||
     typeof response.isPlaying !== "boolean" ||
@@ -142,7 +173,11 @@ async function sendMessageWithAutoInjection(tabId, payload, scriptFile) {
 async function injectScriptsIntoExistingTabs() {
   try {
     const tabs = await chrome.tabs.query({
-      url: [...URL_MATCHES.YOUTUBE, ...URL_MATCHES.SPOTIFY],
+      url: [
+        ...URL_MATCHES.YOUTUBE,
+        ...URL_MATCHES.INSTAGRAM,
+        ...URL_MATCHES.SPOTIFY,
+      ],
     });
 
     await Promise.all(
@@ -154,6 +189,9 @@ async function injectScriptsIntoExistingTabs() {
         const url = tab.url ?? "";
         if (isYouTubeUrl(url)) {
           await ensureContentScriptInjected(tab.id, CONTENT_SCRIPTS.YOUTUBE);
+        }
+        if (isInstagramUrl(url)) {
+          await ensureContentScriptInjected(tab.id, CONTENT_SCRIPTS.INSTAGRAM);
         }
         if (isSpotifyUrl(url)) {
           await ensureContentScriptInjected(tab.id, CONTENT_SCRIPTS.SPOTIFY);
@@ -236,7 +274,7 @@ async function requestYouTubeState(tabId) {
       CONTENT_SCRIPTS.YOUTUBE
     );
 
-    const normalizedState = normalizeYouTubeState(response);
+    const normalizedState = normalizePlaybackState(response);
     if (normalizedState) {
       youtubeTabStates.set(tabId, normalizedState);
       return normalizedState;
@@ -248,21 +286,108 @@ async function requestYouTubeState(tabId) {
   return youtubeTabStates.get(tabId) ?? null;
 }
 
-async function shouldReduceSpotifyVolume() {
-  const activeTab = await getActiveTab();
-  if (!activeTab?.id || !isYouTubeUrl(activeTab.url ?? "")) {
+async function requestInstagramState(tabId) {
+  try {
+    const response = await sendMessageWithAutoInjection(
+      tabId,
+      { type: MESSAGE_TYPES.GET_INSTAGRAM_STATE },
+      CONTENT_SCRIPTS.INSTAGRAM
+    );
+
+    const normalizedState = normalizePlaybackState(response);
+    if (normalizedState) {
+      instagramTabStates.set(tabId, normalizedState);
+      return normalizedState;
+    }
+  } catch (_error) {
+    // The tab may not currently have a reachable Instagram content script.
+  }
+
+  return instagramTabStates.get(tabId) ?? null;
+}
+
+function stateIndicatesPlaying(state) {
+  if (!state) {
     return false;
   }
 
-  const knownState =
-    youtubeTabStates.get(activeTab.id) ??
-    (await requestYouTubeState(activeTab.id));
+  const onVideoPage =
+    state.onVideoPage ||
+    (state.url &&
+      (isYouTubeVideoUrl(state.url) || isInstagramVideoUrl(state.url)));
+
+  return Boolean(state.isPlaying && onVideoPage);
+}
+
+function shouldPauseFromKnownStates() {
+  for (const state of youtubeTabStates.values()) {
+    if (stateIndicatesPlaying(state)) {
+      return true;
+    }
+  }
+
+  for (const state of instagramTabStates.values()) {
+    if (stateIndicatesPlaying(state)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function refreshYouTubeStates() {
+  const youtubeTabs = await chrome.tabs.query({ url: URL_MATCHES.YOUTUBE });
+
+  await Promise.all(
+    youtubeTabs
+      .map((tab) => tab.id)
+      .filter((tabId) => typeof tabId === "number")
+      .map((tabId) => requestYouTubeState(tabId))
+  );
+}
+
+async function refreshInstagramStates() {
+  const instagramTabs = await chrome.tabs.query({ url: URL_MATCHES.INSTAGRAM });
+
+  await Promise.all(
+    instagramTabs
+      .map((tab) => tab.id)
+      .filter((tabId) => typeof tabId === "number")
+      .map((tabId) => requestInstagramState(tabId))
+  );
+}
+
+async function shouldPauseSpotify() {
+  if (shouldPauseFromKnownStates()) {
+    return true;
+  }
+
+  await Promise.all([refreshYouTubeStates(), refreshInstagramStates()]);
+  return shouldPauseFromKnownStates();
+}
+
+async function shouldReduceSpotifyVolume() {
+  const activeTab = await getActiveTab();
+  if (
+    !activeTab?.id ||
+    (!isYouTubeUrl(activeTab.url ?? "") && !isInstagramUrl(activeTab.url ?? ""))
+  ) {
+    return false;
+  }
+
+  const knownState = isYouTubeUrl(activeTab.url ?? "")
+    ? youtubeTabStates.get(activeTab.id) ??
+      (await requestYouTubeState(activeTab.id))
+    : instagramTabStates.get(activeTab.id) ??
+      (await requestInstagramState(activeTab.id));
 
   if (!knownState) {
     return false;
   }
 
-  const activeTabOnVideoPage = isYouTubeVideoUrl(activeTab.url ?? "");
+  const activeTabOnVideoPage =
+    isYouTubeVideoUrl(activeTab.url ?? "") ||
+    isInstagramVideoUrl(activeTab.url ?? "");
   return Boolean(
     knownState.isPlaying && knownState.onVideoPage && activeTabOnVideoPage
   );
@@ -353,7 +478,6 @@ async function broadcastSpotifyVolume(volume) {
 
 async function evaluateAndApplyVolume() {
   try {
-    const shouldReduce = await shouldReduceSpotifyVolume();
     if (currentMode === MODE_PAUSE) {
       desiredSpotifyVolume = FULL_VOLUME;
       if (lastBroadcastVolume !== FULL_VOLUME) {
@@ -362,7 +486,7 @@ async function evaluateAndApplyVolume() {
         });
       }
 
-      const nextPauseState = shouldReduce;
+      const nextPauseState = await shouldPauseSpotify();
       if (nextPauseState === lastPauseState) {
         clearRetryEvaluation();
         return;
@@ -381,6 +505,7 @@ async function evaluateAndApplyVolume() {
       return;
     }
 
+    const shouldReduce = await shouldPauseSpotify();
     const targetVolume = shouldReduce ? REDUCED_VOLUME : FULL_VOLUME;
     desiredSpotifyVolume = targetVolume;
 
@@ -415,7 +540,7 @@ function scheduleVolumeEvaluation() {
 }
 
 chrome.runtime.onMessage.addListener((message, sender) => {
-  if (!message || message.type !== MESSAGE_TYPES.YOUTUBE_STATE) {
+  if (!message) {
     return;
   }
 
@@ -424,12 +549,23 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     return;
   }
 
-  youtubeTabStates.set(tabId, {
-    isPlaying: Boolean(message.isPlaying),
-    onVideoPage: Boolean(message.onVideoPage),
-    url: typeof message.url === "string" ? message.url : sender.tab?.url ?? "",
-    updatedAt: Date.now(),
-  });
+  if (message.type === MESSAGE_TYPES.YOUTUBE_STATE) {
+    youtubeTabStates.set(tabId, {
+      isPlaying: Boolean(message.isPlaying),
+      onVideoPage: Boolean(message.onVideoPage),
+      url: typeof message.url === "string" ? message.url : sender.tab?.url ?? "",
+      updatedAt: Date.now(),
+    });
+  } else if (message.type === MESSAGE_TYPES.INSTAGRAM_STATE) {
+    instagramTabStates.set(tabId, {
+      isPlaying: Boolean(message.isPlaying),
+      onVideoPage: Boolean(message.onVideoPage),
+      url: typeof message.url === "string" ? message.url : sender.tab?.url ?? "",
+      updatedAt: Date.now(),
+    });
+  } else {
+    return;
+  }
 
   scheduleVolumeEvaluation();
 });
@@ -457,6 +593,21 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         });
       }
     }
+
+    if (!isInstagramUrl(nextUrl)) {
+      instagramTabStates.delete(tabId);
+    } else {
+      const previousState = instagramTabStates.get(tabId);
+      if (previousState) {
+        instagramTabStates.set(tabId, {
+          ...previousState,
+          isPlaying: false,
+          onVideoPage: isInstagramVideoUrl(nextUrl),
+          url: nextUrl,
+          updatedAt: Date.now(),
+        });
+      }
+    }
   }
 
   if (isSpotifyUrl(nextUrl) && changeInfo.status === "complete") {
@@ -477,6 +628,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   youtubeTabStates.delete(tabId);
+  instagramTabStates.delete(tabId);
 
   if (tabId === activeTabId) {
     activeTabId = null;

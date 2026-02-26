@@ -354,7 +354,7 @@ test("lowers Spotify when active YouTube video plays and restores on pause", asy
   assert.equal(restored, true, "expected Spotify volume to restore to 1.0");
 });
 
-test("does not lower Spotify when YouTube is playing in a background tab", async () => {
+test("lowers Spotify when YouTube is playing in a background tab", async () => {
   const chrome = new FakeChrome([
     { id: 1, url: SPOTIFY_URL, active: false, spotifyConnected: true },
     { id: 2, url: YOUTUBE_WATCH_URL, active: false, youtubeConnected: true },
@@ -375,12 +375,16 @@ test("does not lower Spotify when YouTube is playing in a background tab", async
     url: YOUTUBE_WATCH_URL,
   });
 
-  await sleep(600);
-
-  const loweredCommands = chrome.spotifyCommands.filter(
-    (command) => command.volume === DUCKED_VOLUME && command.success
+  const lowered = await waitFor(() =>
+    chrome.spotifyCommands.some(
+      (command) => command.volume === DUCKED_VOLUME && command.success
+    )
   );
-  assert.equal(loweredCommands.length, 0);
+  assert.equal(
+    lowered,
+    true,
+    "expected Spotify volume to lower even when YouTube is in background"
+  );
 });
 
 test("retries Spotify volume update after transient failures", async () => {
